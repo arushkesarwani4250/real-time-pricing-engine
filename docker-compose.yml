@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  pricing-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: real_time_pricing_engine
+    ports:
+      - "8080:8080"
+    environment:
+      - UPSTREAM_WS_URL=wss://v3-prod.livefxhub.com/ws/algo
+      - API_KEY=${API_KEY:-50558cc472f332b399c2760009728e70f39562a4399693b5}
+      - SECRET_KEY=${SECRET_KEY:-2451125110c1a9216219b0aca76eb1d25380dba220d80e741100386c0dc1d31d}
+      - PORT=8080
+      - LOG_LEVEL=info
+      - MOCK_FEED=${MOCK_FEED:-false}
+    volumes:
+      # Persistent volume mount so rolling 24h state survives container restarts
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
