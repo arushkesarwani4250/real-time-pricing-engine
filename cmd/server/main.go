@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"real_time/config"
+	"real_time/internal/downstream"
 	"real_time/internal/engine"
 	"real_time/internal/storage"
 	"real_time/internal/upstream"
@@ -45,16 +46,26 @@ func main() {
 		log.Printf("[Main] Warning: Failed to load previous state: %v", err)
 	} else if savedState != nil {
 		restoredCount := pricingEngine.RestoreState(savedState, time.Now())
-		log.Printf("[Main] [Recovery] Successfully restored 24h state for %d symbols from data/state.json (Saved at: %s)",
-			restoredCount, savedState.SavedAt.Format(time.RFC3339))
+		log.Printf("[Main] [Recovery] Successfully restored 24h state for %d symbols from data/state.json", restoredCount)
 	} else {
 		log.Println("[Main] Cold start: No existing state file found. Starting fresh.")
 	}
 
-	// 4. Inbound channel for raw market ticks
+	// 4. Initialize Downstream WebSocket Hub & Server (Milestone 6)
+	hub := downstream.NewHub(pricingEngine)
+	go hub.Run(ctx)
+
+	server := downstream.NewServer(cfg.Port, hub)
+	go func() {
+		if err := server.Start(ctx); err != nil {
+			log.Printf("[Main] Downstream server stopped: %v", err)
+		}
+	}()
+
+	// 5. Inbound channel for raw market ticks
 	rawTickChan := make(chan []byte, 5000)
 
-	// 5. Connect to live upstream or fallback to test feed generator
+	// 6. Connect to live upstream or fallback to test feed generator
 	client := upstream.NewClient(cfg.UpstreamWSURL, cfg.APIKey, cfg.SecretKey, upstream.AllRequiredSymbols)
 
 	useMock := cfg.MockFeed
@@ -84,9 +95,9 @@ func main() {
 		}()
 	}
 
-	// 6. Processing Pipeline: Ingestion -> Sanitizer -> 24h Rolling Window Engine
+	// 7. Processing Pipeline: Ingestion -> Sanitizer -> 24h Engine -> Downstream Hub
 	go func() {
-		log.Println("[Engine Worker] Real-Time 24-Hour calculation engine active...")
+		log.Println("[Engine Worker] Real-Time 24-Hour calculation and broadcast pipeline active...")
 		for {
 			select {
 			case <-ctx.Done():
@@ -103,23 +114,26 @@ func main() {
 
 				enriched := pricingEngine.ProcessTick(cleanTick)
 
+				// Broadcast delta price update to connected downstream WebSocket clients
+				hub.Broadcast(enriched)
+
 				m := sanitizer.GetMetrics()
 				if m.ValidProcessed%50 == 0 {
-					log.Printf("[Engine] [Tick #%4d] %-7s | Mid: %9.4f | 24h High: %9.4f | 24h Low: %9.4f | 24h Chg: %+6.2f%% | Latency: %.2fms",
+					log.Printf("[Engine] [Tick #%4d] %-7s | Mid: %9.4f | 24h High: %9.4f | 24h Low: %9.4f | 24h Chg: %+6.2f%% | Clients: %d",
 						m.ValidProcessed,
 						enriched.Symbol,
 						enriched.MidPrice,
 						enriched.High24h,
 						enriched.Low24h,
 						enriched.Change24h,
-						enriched.LatencyMs,
+						hub.ClientCount(),
 					)
 				}
 			}
 		}
 	}()
 
-	// 7. Background Periodic Persistence Ticker (Saves state every 5 seconds)
+	// 8. Background Periodic Persistence Ticker (Every 5 seconds)
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -132,27 +146,20 @@ func main() {
 				state := pricingEngine.ExportState()
 				if err := store.SaveState(state); err != nil {
 					log.Printf("[Store] Periodic state save failed: %v", err)
-				} else {
-					log.Printf("[Store] Periodic snapshot saved (%d symbols persisted to data/state.json)", len(state.Symbols))
 				}
 			}
 		}
 	}()
 
-	log.Println("[Main] Engine running smoothly! Press Ctrl+C to stop.")
+	log.Printf("[Main] Engine running smoothly on :%s! Press Ctrl+C to stop.", cfg.Port)
 
 	<-ctx.Done()
 	log.Println("[Main] Shutdown signal received, terminating...")
 
-	// 8. Graceful Shutdown: Flush current state immediately to disk
 	finalState := pricingEngine.ExportState()
-	if err := store.SaveState(finalState); err != nil {
-		log.Printf("[Main] Failed to save final state on shutdown: %v", err)
-	} else {
-		log.Printf("[Main] Final state successfully persisted to data/state.json (%d symbols)", len(finalState.Symbols))
-	}
+	_ = store.SaveState(finalState)
 
 	m := sanitizer.GetMetrics()
-	log.Printf("[Main] Ingestion Summary: Processed=%d | Latency target: <= 50ms [PASS]", m.ValidProcessed)
+	log.Printf("[Main] Ingestion Summary: Processed=%d | Active Clients=%d", m.ValidProcessed, hub.ClientCount())
 	log.Println("[Main] Clean shutdown complete.")
 }
