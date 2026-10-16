@@ -14,5 +14,6 @@ dist/
 .DS_Store
 Thumbs.db
 .idea/
-.vscode/
-*.swp
+# Persistent data storage
+data/
+

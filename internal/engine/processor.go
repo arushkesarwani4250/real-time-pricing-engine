@@ -80,3 +80,53 @@ func (pe *PricingEngine) GetAllPrices() []*MarketPrice {
 	}
 	return res
 }
+
+// ExportState extracts the in-memory rolling window state for persistence.
+func (pe *PricingEngine) ExportState() *EngineState {
+	pe.mu.RLock()
+	defer pe.mu.RUnlock()
+
+	state := &EngineState{
+		SavedAt: time.Now(),
+		Symbols: make(map[string]*PersistedSymbolState),
+	}
+
+	for sym, rw := range pe.windows {
+		state.Symbols[sym] = &PersistedSymbolState{
+			Symbol:    sym,
+			LastPrice: pe.latestPrices[sym],
+			Buckets:   rw.ExportBuckets(),
+		}
+	}
+
+	return state
+}
+
+// RestoreState repopulates the engine with persisted historical state after a restart.
+func (pe *PricingEngine) RestoreState(state *EngineState, now time.Time) int {
+	if state == nil || len(state.Symbols) == 0 {
+		return 0
+	}
+
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+
+	restoredCount := 0
+	for sym, pState := range state.Symbols {
+		rw := NewRollingWindow(sym)
+		rw.ImportBuckets(pState.Buckets, now)
+		pe.windows[sym] = rw
+
+		if pState.LastPrice != nil {
+			// Recalculate 24h stats based on restored buckets and current time
+			h, l, c := rw.Get24hStats(pState.LastPrice.MidPrice, now)
+			pState.LastPrice.High24h = h
+			pState.LastPrice.Low24h = l
+			pState.LastPrice.Change24h = c
+			pe.latestPrices[sym] = pState.LastPrice
+		}
+		restoredCount++
+	}
+
+	return restoredCount
+}

@@ -36,6 +36,19 @@ type MarketPrice struct {
 	LatencyMs float64   `json:"latency_ms"` // End-to-end processing latency
 }
 
+// PersistedSymbolState captures all active minute buckets and the last known price for a symbol.
+type PersistedSymbolState struct {
+	Symbol    string                  `json:"symbol"`
+	LastPrice *MarketPrice            `json:"last_price"`
+	Buckets   map[int64]*MinuteBucket `json:"buckets"`
+}
+
+// EngineState captures the full snapshot of all market instruments for crash recovery.
+type EngineState struct {
+	SavedAt time.Time                        `json:"saved_at"`
+	Symbols map[string]*PersistedSymbolState `json:"symbols"`
+}
+
 // SanitizerMetrics tracks data hygiene and fault-tolerance statistics.
 type SanitizerMetrics struct {
 	TotalReceived     int64 `json:"total_received"`

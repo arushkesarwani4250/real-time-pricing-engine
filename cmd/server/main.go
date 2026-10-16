@@ -10,6 +10,7 @@ import (
 
 	"real_time/config"
 	"real_time/internal/engine"
+	"real_time/internal/storage"
 	"real_time/internal/upstream"
 )
 
@@ -28,14 +29,32 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// 1. Inbound channel for raw market ticks
-	rawTickChan := make(chan []byte, 5000)
+	// 1. Initialize Persistence Store (Milestone 5)
+	store, err := storage.NewFileStore("data/state.json")
+	if err != nil {
+		log.Fatalf("[Main] Failed to initialize file store: %v", err)
+	}
 
-	// 2. Initialize Sanitizer and 24-Hour Pricing Engine
+	// 2. Initialize Engine components
 	sanitizer := engine.NewSanitizer(0.50)
 	pricingEngine := engine.NewPricingEngine()
 
-	// 3. Connect to live upstream or fallback to test feed generator
+	// 3. Restore state on startup (Survives process restarts)
+	savedState, err := store.LoadState()
+	if err != nil {
+		log.Printf("[Main] Warning: Failed to load previous state: %v", err)
+	} else if savedState != nil {
+		restoredCount := pricingEngine.RestoreState(savedState, time.Now())
+		log.Printf("[Main] [Recovery] Successfully restored 24h state for %d symbols from data/state.json (Saved at: %s)",
+			restoredCount, savedState.SavedAt.Format(time.RFC3339))
+	} else {
+		log.Println("[Main] Cold start: No existing state file found. Starting fresh.")
+	}
+
+	// 4. Inbound channel for raw market ticks
+	rawTickChan := make(chan []byte, 5000)
+
+	// 5. Connect to live upstream or fallback to test feed generator
 	client := upstream.NewClient(cfg.UpstreamWSURL, cfg.APIKey, cfg.SecretKey, upstream.AllRequiredSymbols)
 
 	useMock := cfg.MockFeed
@@ -65,7 +84,7 @@ func main() {
 		}()
 	}
 
-	// 4. Processing Pipeline: Ingestion -> Sanitizer -> 24h Rolling Window Engine
+	// 6. Processing Pipeline: Ingestion -> Sanitizer -> 24h Rolling Window Engine
 	go func() {
 		log.Println("[Engine Worker] Real-Time 24-Hour calculation engine active...")
 		for {
@@ -82,10 +101,8 @@ func main() {
 					continue
 				}
 
-				// Milestone 4: Compute rolling 24h High, Low, and % Change
 				enriched := pricingEngine.ProcessTick(cleanTick)
 
-				// Log sample updates showing our computed 24h stats
 				m := sanitizer.GetMetrics()
 				if m.ValidProcessed%50 == 0 {
 					log.Printf("[Engine] [Tick #%4d] %-7s | Mid: %9.4f | 24h High: %9.4f | 24h Low: %9.4f | 24h Chg: %+6.2f%% | Latency: %.2fms",
@@ -102,11 +119,38 @@ func main() {
 		}
 	}()
 
+	// 7. Background Periodic Persistence Ticker (Saves state every 5 seconds)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				state := pricingEngine.ExportState()
+				if err := store.SaveState(state); err != nil {
+					log.Printf("[Store] Periodic state save failed: %v", err)
+				} else {
+					log.Printf("[Store] Periodic snapshot saved (%d symbols persisted to data/state.json)", len(state.Symbols))
+				}
+			}
+		}
+	}()
+
 	log.Println("[Main] Engine running smoothly! Press Ctrl+C to stop.")
 
 	<-ctx.Done()
 	log.Println("[Main] Shutdown signal received, terminating...")
-	time.Sleep(200 * time.Millisecond)
+
+	// 8. Graceful Shutdown: Flush current state immediately to disk
+	finalState := pricingEngine.ExportState()
+	if err := store.SaveState(finalState); err != nil {
+		log.Printf("[Main] Failed to save final state on shutdown: %v", err)
+	} else {
+		log.Printf("[Main] Final state successfully persisted to data/state.json (%d symbols)", len(finalState.Symbols))
+	}
 
 	m := sanitizer.GetMetrics()
 	log.Printf("[Main] Ingestion Summary: Processed=%d | Latency target: <= 50ms [PASS]", m.ValidProcessed)

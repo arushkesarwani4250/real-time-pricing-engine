@@ -69,7 +69,6 @@ func (rw *RollingWindow) AddTick(price float64, t time.Time) {
 }
 
 // Get24hStats calculates the rolling 24h High, Low, and % Change.
-// Returns (high24h, low24h, change24hPct).
 func (rw *RollingWindow) Get24hStats(currentPrice float64, now time.Time) (float64, float64, float64) {
 	rw.mu.RLock()
 	defer rw.mu.RUnlock()
@@ -112,7 +111,6 @@ func (rw *RollingWindow) Get24hStats(currentPrice float64, now time.Time) (float
 		}
 	}
 
-	// Ensure current tick is factored into high/low
 	if currentPrice > high {
 		high = currentPrice
 	}
@@ -120,13 +118,41 @@ func (rw *RollingWindow) Get24hStats(currentPrice float64, now time.Time) (float
 		low = currentPrice
 	}
 
-	// Calculate 24h % Change: ((Current - Open) / Open) * 100
 	changePct := 0.0
 	if oldestOpen > 0 {
 		changePct = ((currentPrice - oldestOpen) / oldestOpen) * 100.0
 	}
 
 	return high, low, changePct
+}
+
+// ExportBuckets copies all active buckets for persistence.
+func (rw *RollingWindow) ExportBuckets() map[int64]*MinuteBucket {
+	rw.mu.RLock()
+	defer rw.mu.RUnlock()
+
+	res := make(map[int64]*MinuteBucket, len(rw.buckets))
+	for k, v := range rw.buckets {
+		bCopy := *v
+		res[k] = &bCopy
+	}
+	return res
+}
+
+// ImportBuckets restores buckets from storage and prunes any that expired while offline.
+func (rw *RollingWindow) ImportBuckets(buckets map[int64]*MinuteBucket, now time.Time) {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+
+	cutoff := (now.Unix() / 60) - 1440
+	rw.buckets = make(map[int64]*MinuteBucket)
+
+	for k, v := range buckets {
+		if k >= cutoff {
+			bCopy := *v
+			rw.buckets[k] = &bCopy
+		}
+	}
 }
 
 // BucketCount returns current active buckets in memory.
