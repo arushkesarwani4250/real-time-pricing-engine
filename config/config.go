@@ -16,13 +16,11 @@ type Config struct {
 	SecretKey     string
 	Port          string
 	LogLevel      string
+	MockFeed      bool
 }
 
 // Load loads the configuration from .env (if present) and system environment variables.
-// It enforces that required fields like APIKey and SecretKey are present.
 func Load() (*Config, error) {
-	// Attempt to load .env file. In production/Docker, variables are injected
-	// directly into the environment, so we ignore file-not-found errors.
 	_ = godotenv.Load()
 
 	cfg := &Config{
@@ -31,21 +29,23 @@ func Load() (*Config, error) {
 		SecretKey:     strings.TrimSpace(os.Getenv("SECRET_KEY")),
 		Port:          getEnv("PORT", "8080"),
 		LogLevel:      getEnv("LOG_LEVEL", "info"),
+		MockFeed:      strings.ToLower(strings.TrimSpace(os.Getenv("MOCK_FEED"))) == "true",
 	}
 
-	// Validation: Fail fast if credentials are not configured
-	if cfg.APIKey == "" {
-		return nil, errors.New("API_KEY environment variable is required")
-	}
-	if cfg.SecretKey == "" {
-		return nil, errors.New("SECRET_KEY environment variable is required")
+	// Validation: Fail fast only if not running mock feed
+	if !cfg.MockFeed {
+		if cfg.APIKey == "" {
+			return nil, errors.New("API_KEY environment variable is required")
+		}
+		if cfg.SecretKey == "" {
+			return nil, errors.New("SECRET_KEY environment variable is required")
+		}
 	}
 
 	return cfg, nil
 }
 
-// MaskKey returns a masked version of a sensitive key (e.g., "50558c...93b5")
-// to prevent leaking full credentials into terminal logs.
+// MaskKey returns a masked version of a sensitive key.
 func MaskKey(key string) string {
 	if len(key) <= 8 {
 		return "******"
