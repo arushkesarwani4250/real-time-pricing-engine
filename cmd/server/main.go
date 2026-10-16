@@ -65,34 +65,17 @@ func main() {
 	// 5. Inbound channel for raw market ticks
 	rawTickChan := make(chan []byte, 5000)
 
-	// 6. Connect to live upstream or fallback to test feed generator
+	// 6. Milestone 7: Upstream Ingestion & Supervisor
 	client := upstream.NewClient(cfg.UpstreamWSURL, cfg.APIKey, cfg.SecretKey, upstream.AllRequiredSymbols)
 
-	useMock := cfg.MockFeed
-	if !useMock {
-		if err := client.Connect(); err != nil {
-			log.Printf("[Main] Live upstream connect failed: %v. Falling back to test feed.", err)
-			useMock = true
-		} else if err := client.Authenticate(); err != nil {
-			log.Printf("[Main] Live upstream auth rejected: %v. Falling back to test feed.", err)
-			useMock = true
-		} else if err := client.Subscribe(); err != nil {
-			log.Printf("[Main] Live upstream subscribe failed: %v. Falling back to test feed.", err)
-			useMock = true
-		}
-	}
-
-	if useMock {
-		log.Println("[Main] Running with Mock Feed Generator (simulating 61 live currency pairs).")
+	if cfg.MockFeed {
+		log.Println("[Main] MockFeed mode enabled: streaming simulated ticks.")
 		mock := upstream.NewMockFeed(upstream.AllRequiredSymbols)
-		go mock.Run(ctx, rawTickChan, 20*time.Millisecond) // ~50 ticks/sec
+		go mock.Run(ctx, rawTickChan, 20*time.Millisecond)
 	} else {
-		log.Println("[Main] Streaming live market data from upstream WebSocket...")
-		go func() {
-			if err := client.Listen(ctx, rawTickChan); err != nil {
-				log.Printf("[Main] Upstream listener error: %v", err)
-			}
-		}()
+		// Run Upstream with Resilient Supervisor (Auto-reconnect with Exponential Backoff)
+		supervisor := upstream.NewSupervisor(client, upstream.DefaultSupervisorConfig())
+		go supervisor.Run(ctx, rawTickChan)
 	}
 
 	// 7. Processing Pipeline: Ingestion -> Sanitizer -> 24h Engine -> Downstream Hub
