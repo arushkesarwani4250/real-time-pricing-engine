@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 
 	"real_time/internal/engine"
@@ -17,17 +18,41 @@ type Hub struct {
 	unregister    chan *Client
 	broadcast     chan *engine.MarketPrice
 	pricingEngine *engine.PricingEngine
+	validSymbols  map[string]bool
 }
 
-// NewHub constructs a new Downstream Hub.
-func NewHub(pricingEngine *engine.PricingEngine) *Hub {
-	return &Hub{
+// NewHub constructs a new Downstream Hub with optional symbol validation.
+func NewHub(pricingEngine *engine.PricingEngine, allowedSymbols ...[]string) *Hub {
+	h := &Hub{
 		clients:       make(map[*Client]bool),
 		register:      make(chan *Client),
 		unregister:    make(chan *Client),
 		broadcast:     make(chan *engine.MarketPrice, 1000),
 		pricingEngine: pricingEngine,
+		validSymbols:  make(map[string]bool),
 	}
+	if len(allowedSymbols) > 0 {
+		for _, s := range allowedSymbols[0] {
+			h.validSymbols[strings.ToUpper(strings.TrimSpace(s))] = true
+		}
+	}
+	return h
+}
+
+// ValidateSymbols checks which symbols are known and which are unrecognized.
+func (h *Hub) ValidateSymbols(symbols []string) (valid []string, invalid []string) {
+	if len(h.validSymbols) == 0 {
+		return symbols, nil
+	}
+	for _, s := range symbols {
+		norm := strings.ToUpper(strings.TrimSpace(s))
+		if norm == "*" || h.validSymbols[norm] {
+			valid = append(valid, norm)
+		} else {
+			invalid = append(invalid, norm)
+		}
+	}
+	return valid, invalid
 }
 
 // Run executes the central event loop of the Hub.
@@ -61,7 +86,6 @@ func (h *Hub) Run(ctx context.Context) {
 			log.Printf("[Hub] Client disconnected. Total active clients: %d", h.ClientCount())
 
 		case price := <-h.broadcast:
-			// Delta Encoding: Only send the specific symbol update that changed!
 			update := CompactPriceUpdate{
 				Type:      "price_update",
 				Symbol:    price.Symbol,
@@ -80,21 +104,32 @@ func (h *Hub) Run(ctx context.Context) {
 				continue
 			}
 
-			// Broadcast delta payload to interested subscribers
+			// Deliver delta update to subscribed clients
 			h.mu.RLock()
+			var slow []*Client
 			for client := range h.clients {
 				if client.IsSubscribed(price.Symbol) {
 					select {
 					case client.send <- data:
 					default:
-						// Slow client: Buffer is full, drop to avoid head-of-line blocking
-						log.Printf("[Hub] Dropping slow client (buffer overflow)")
-						close(client.send)
-						delete(h.clients, client)
+						slow = append(slow, client)
 					}
 				}
 			}
 			h.mu.RUnlock()
+
+			// Evict slow clients that overflowed buffer
+			if len(slow) > 0 {
+				h.mu.Lock()
+				for _, c := range slow {
+					if _, ok := h.clients[c]; ok {
+						log.Printf("[Hub] Dropping slow client (buffer overflow)")
+						close(c.send)
+						delete(h.clients, c)
+					}
+				}
+				h.mu.Unlock()
+			}
 		}
 	}
 }
@@ -104,7 +139,6 @@ func (h *Hub) Broadcast(price *engine.MarketPrice) {
 	select {
 	case h.broadcast <- price:
 	default:
-		// Queue full under extreme load
 	}
 }
 
@@ -113,7 +147,7 @@ func (h *Hub) GetSnapshot() []*engine.MarketPrice {
 	if h.pricingEngine != nil {
 		return h.pricingEngine.GetAllPrices()
 	}
-	return nil
+	return []*engine.MarketPrice{}
 }
 
 // ClientCount returns the count of currently connected clients.

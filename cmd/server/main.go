@@ -16,71 +16,63 @@ import (
 )
 
 func main() {
-	log.Println("[Main] Initializing Real-Time Pricing Engine...")
-
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("[Main] Configuration error: %v", err)
+		log.Fatalf("failed to load configuration: %v", err)
 	}
 
-	log.Printf("[Main] Configuration loaded.")
-	log.Printf("[Main] Upstream WS: %s", cfg.UpstreamWSURL)
-	log.Printf("[Main] API Key:     %s", config.MaskKey(cfg.APIKey))
+	log.Printf("Starting pricing engine (port=%s, upstream=%s, key=%s)",
+		cfg.Port, cfg.UpstreamWSURL, config.MaskKey(cfg.APIKey))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// 1. Initialize Persistence Store (Milestone 5)
+	// Persistence store for surviving process restarts
 	store, err := storage.NewFileStore("data/state.json")
 	if err != nil {
-		log.Fatalf("[Main] Failed to initialize file store: %v", err)
+		log.Fatalf("failed to initialize state store: %v", err)
 	}
 
-	// 2. Initialize Engine components
 	sanitizer := engine.NewSanitizer(0.50)
+	sanitizer.SetAllowedSymbols(upstream.AllRequiredSymbols)
 	pricingEngine := engine.NewPricingEngine()
 
-	// 3. Restore state on startup (Survives process restarts)
-	savedState, err := store.LoadState()
-	if err != nil {
-		log.Printf("[Main] Warning: Failed to load previous state: %v", err)
+	// Restore historical sliding window on startup
+	if savedState, err := store.LoadState(); err != nil {
+		log.Printf("warning: could not load previous state: %v", err)
 	} else if savedState != nil {
-		restoredCount := pricingEngine.RestoreState(savedState, time.Now())
-		log.Printf("[Main] [Recovery] Successfully restored 24h state for %d symbols from data/state.json", restoredCount)
+		restored := pricingEngine.RestoreState(savedState, time.Now())
+		log.Printf("restored state for %d symbols from data/state.json", restored)
 	} else {
-		log.Println("[Main] Cold start: No existing state file found. Starting fresh.")
+		log.Println("cold start: no previous state file found")
 	}
 
-	// 4. Initialize Downstream WebSocket Hub & Server (Milestone 6)
-	hub := downstream.NewHub(pricingEngine)
+	// Downstream pub/sub hub and HTTP/WS server
+	hub := downstream.NewHub(pricingEngine, upstream.AllRequiredSymbols)
 	go hub.Run(ctx)
 
-	server := downstream.NewServer(cfg.Port, hub)
+	server := downstream.NewServer(cfg.Port, hub, cfg.AllowedOrigins)
 	go func() {
 		if err := server.Start(ctx); err != nil {
-			log.Printf("[Main] Downstream server stopped: %v", err)
+			log.Printf("downstream server stopped: %v", err)
 		}
 	}()
 
-	// 5. Inbound channel for raw market ticks
 	rawTickChan := make(chan []byte, 5000)
 
-	// 6. Milestone 7: Upstream Ingestion & Supervisor
-	client := upstream.NewClient(cfg.UpstreamWSURL, cfg.APIKey, cfg.SecretKey, upstream.AllRequiredSymbols)
-
+	// Upstream ingestion supervisor or local mock feed
 	if cfg.MockFeed {
-		log.Println("[Main] MockFeed mode enabled: streaming simulated ticks.")
+		log.Println("mock feed enabled: streaming simulated market ticks")
 		mock := upstream.NewMockFeed(upstream.AllRequiredSymbols)
 		go mock.Run(ctx, rawTickChan, 20*time.Millisecond)
 	} else {
-		// Run Upstream with Resilient Supervisor (Auto-reconnect with Exponential Backoff)
+		client := upstream.NewClient(cfg.UpstreamWSURL, cfg.APIKey, cfg.SecretKey, upstream.AllRequiredSymbols)
 		supervisor := upstream.NewSupervisor(client, upstream.DefaultSupervisorConfig())
 		go supervisor.Run(ctx, rawTickChan)
 	}
 
-	// 7. Processing Pipeline: Ingestion -> Sanitizer -> 24h Engine -> Downstream Hub
+	// Processing pipeline: sanitize tick -> compute rolling metrics -> broadcast delta
 	go func() {
-		log.Println("[Engine Worker] Real-Time 24-Hour calculation and broadcast pipeline active...")
 		for {
 			select {
 			case <-ctx.Done():
@@ -96,13 +88,11 @@ func main() {
 				}
 
 				enriched := pricingEngine.ProcessTick(cleanTick)
-
-				// Broadcast delta price update to connected downstream WebSocket clients
 				hub.Broadcast(enriched)
 
 				m := sanitizer.GetMetrics()
 				if m.ValidProcessed%50 == 0 {
-					log.Printf("[Engine] [Tick #%4d] %-7s | Mid: %9.4f | 24h High: %9.4f | 24h Low: %9.4f | 24h Chg: %+6.2f%% | Clients: %d",
+					log.Printf("[Tick #%4d] %-7s | Mid: %9.4f | 24h High: %9.4f | 24h Low: %9.4f | 24h Chg: %+6.2f%% | Clients: %d",
 						m.ValidProcessed,
 						enriched.Symbol,
 						enriched.MidPrice,
@@ -116,7 +106,7 @@ func main() {
 		}
 	}()
 
-	// 8. Background Periodic Persistence Ticker (Every 5 seconds)
+	// Periodic snapshot persistence
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -128,21 +118,22 @@ func main() {
 			case <-ticker.C:
 				state := pricingEngine.ExportState()
 				if err := store.SaveState(state); err != nil {
-					log.Printf("[Store] Periodic state save failed: %v", err)
+					log.Printf("periodic state snapshot failed: %v", err)
 				}
 			}
 		}
 	}()
 
-	log.Printf("[Main] Engine running smoothly on :%s! Press Ctrl+C to stop.", cfg.Port)
+	log.Printf("pricing engine online at :%s", cfg.Port)
 
 	<-ctx.Done()
-	log.Println("[Main] Shutdown signal received, terminating...")
+	log.Println("shutdown signal received, flushing state...")
 
 	finalState := pricingEngine.ExportState()
-	_ = store.SaveState(finalState)
+	if err := store.SaveState(finalState); err != nil {
+		log.Printf("failed to save final state snapshot: %v", err)
+	}
 
 	m := sanitizer.GetMetrics()
-	log.Printf("[Main] Ingestion Summary: Processed=%d | Active Clients=%d", m.ValidProcessed, hub.ClientCount())
-	log.Println("[Main] Clean shutdown complete.")
+	log.Printf("shutdown complete: processed %d ticks, active clients: %d", m.ValidProcessed, hub.ClientCount())
 }

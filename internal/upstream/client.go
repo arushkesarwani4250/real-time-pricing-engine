@@ -11,6 +11,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ErrAuthRejected indicates that upstream explicitly rejected the credentials.
+var ErrAuthRejected = fmt.Errorf("upstream authentication rejected")
+
 // Client manages the upstream WebSocket connection to LiveFXHub.
 type Client struct {
 	url       string
@@ -84,7 +87,7 @@ func (c *Client) Authenticate() error {
 	var res map[string]interface{}
 	if err := json.Unmarshal(message, &res); err == nil {
 		if event, ok := res["event"].(string); ok && event == "error" {
-			return fmt.Errorf("upstream auth rejected: %v", res["message"])
+			return fmt.Errorf("%w: %v", ErrAuthRejected, res["message"])
 		}
 	}
 

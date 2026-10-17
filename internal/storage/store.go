@@ -70,6 +70,10 @@ func (fs *FileStore) LoadState() (*engine.EngineState, error) {
 		return nil, fmt.Errorf("failed to read state file: %w", err)
 	}
 
+	if len(data) == 0 {
+		return nil, nil // Empty file treated safely as clean start
+	}
+
 	var state engine.EngineState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal state file: %w", err)

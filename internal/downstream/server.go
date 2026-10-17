@@ -6,17 +6,31 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024 * 16,
-	WriteBufferSize: 1024 * 16,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for dev/dashboard access
-	},
+// makeCheckOrigin creates a configurable origin validator function for WebSocket upgrades.
+func makeCheckOrigin(allowedOrigins []string) func(r *http.Request) bool {
+	// If wildcard or empty, allow all origins (development mode)
+	if len(allowedOrigins) == 0 || (len(allowedOrigins) == 1 && allowedOrigins[0] == "*") {
+		return func(r *http.Request) bool { return true }
+	}
+
+	allowedMap := make(map[string]bool)
+	for _, o := range allowedOrigins {
+		allowedMap[strings.ToLower(strings.TrimSpace(o))] = true
+	}
+
+	return func(r *http.Request) bool {
+		origin := strings.ToLower(r.Header.Get("Origin"))
+		if origin == "" {
+			return true // Allow non-browser clients (e.g. algo bots, curl, backend services)
+		}
+		return allowedMap[origin]
+	}
 }
 
 // Server exposes the downstream HTTP and WebSocket endpoints.
@@ -25,14 +39,20 @@ type Server struct {
 	hub        *Hub
 	httpServer *http.Server
 	startTime  time.Time
+	upgrader   websocket.Upgrader
 }
 
-// NewServer initializes the downstream HTTP/WS server.
-func NewServer(port string, hub *Hub) *Server {
+// NewServer initializes the downstream HTTP/WS server with configurable origin checking.
+func NewServer(port string, hub *Hub, allowedOrigins []string) *Server {
 	return &Server{
 		port:      port,
 		hub:       hub,
 		startTime: time.Now(),
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  1024 * 16,
+			WriteBufferSize: 1024 * 16,
+			CheckOrigin:     makeCheckOrigin(allowedOrigins),
+		},
 	}
 }
 
@@ -40,13 +60,8 @@ func NewServer(port string, hub *Hub) *Server {
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 
-	// 1. WebSocket Endpoint for live price feeds
 	mux.HandleFunc("/ws", s.handleWebSocket)
-
-	// 2. REST Snapshot Endpoint: Returns current state of all symbols
 	mux.HandleFunc("/snapshot", s.handleSnapshot)
-
-	// 3. Health & Monitoring Endpoint
 	mux.HandleFunc("/health", s.handleHealth)
 
 	s.httpServer = &http.Server{
@@ -74,9 +89,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 // handleWebSocket upgrades incoming client connections to WebSockets.
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[Server] WebSocket upgrade error: %v", err)
+		log.Printf("[Server] WebSocket upgrade rejected or failed: %v", err)
 		return
 	}
 

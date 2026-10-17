@@ -19,19 +19,17 @@ func TestSupervisor_BackoffProgression(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Step 1: 100ms -> ~200ms
 	next := sup.sleepWithBackoff(ctx, 100*time.Millisecond)
 	if next < 200*time.Millisecond {
 		t.Errorf("expected next backoff >= 200ms, got %v", next)
 	}
 
-	// Step 2: 200ms -> ~400ms
 	next = sup.sleepWithBackoff(ctx, next)
 	if next < 400*time.Millisecond {
 		t.Errorf("expected next backoff >= 400ms, got %v", next)
 	}
 
-	// Step 3: Clamp at MaxBackoff (800ms)
+	// Verify clamping at MaxBackoff
 	next = sup.sleepWithBackoff(ctx, 600*time.Millisecond)
 	if next > 800*time.Millisecond {
 		t.Errorf("expected backoff to clamp at 800ms, got %v", next)

@@ -105,8 +105,20 @@ func (c *Client) readPump() {
 
 		switch strings.ToLower(req.Action) {
 		case "subscribe":
-			c.Subscribe(req.Symbols)
-			c.sendResponse(NewServerResponse("ok", "subscribed successfully", req.Symbols))
+			valid, invalid := c.hub.ValidateSymbols(req.Symbols)
+			if len(req.Symbols) > 0 && len(valid) == 0 && len(invalid) > 0 {
+				c.sendResponse(NewServerResponse("error", "all requested symbols are unknown", invalid))
+				continue
+			}
+			c.Subscribe(valid)
+			if len(invalid) > 0 {
+				c.sendResponse(NewServerResponse("warning", "subscribed to valid symbols, unknown symbols ignored", map[string]interface{}{
+					"subscribed": valid,
+					"unknown":    invalid,
+				}))
+			} else {
+				c.sendResponse(NewServerResponse("ok", "subscribed successfully", valid))
+			}
 		case "unsubscribe":
 			c.Unsubscribe(req.Symbols)
 			c.sendResponse(NewServerResponse("ok", "unsubscribed successfully", req.Symbols))
@@ -132,25 +144,11 @@ func (c *Client) writePump() {
 		case message, ok := <-c.send:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// The hub closed the channel
 				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			_, _ = w.Write(message)
-
-			// Flush any queued messages into the same write buffer for throughput
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				_, _ = w.Write([]byte("\n"))
-				_, _ = w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
 

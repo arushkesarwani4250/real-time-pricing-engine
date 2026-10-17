@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand"
 	"sync"
@@ -56,22 +57,28 @@ func (s *Supervisor) Run(ctx context.Context, out chan<- []byte) {
 
 		log.Println("[Supervisor] Establishing upstream WebSocket connection...")
 
-		// 1. Dial Upstream
 		if err := s.client.Connect(); err != nil {
 			log.Printf("[Supervisor] Upstream connection failed: %v", err)
 			currentBackoff = s.sleepWithBackoff(ctx, currentBackoff)
 			continue
 		}
 
-		// 2. Authenticate
 		if err := s.client.Authenticate(); err != nil {
 			log.Printf("[Supervisor] Upstream authentication failed: %v", err)
 			_ = s.client.Close()
+
+			// Fast-fail if credentials are fundamentally rejected to avoid IP ban
+			if errors.Is(err, ErrAuthRejected) {
+				log.Println("[Supervisor] Authentication rejected by upstream provider (invalid credentials).")
+				log.Println("[Supervisor] Check API_KEY and SECRET_KEY, or run with MOCK_FEED=true for simulated data.")
+				log.Println("[Supervisor] Halting supervisor to prevent IP rate-limiting.")
+				return
+			}
+
 			currentBackoff = s.sleepWithBackoff(ctx, currentBackoff)
 			continue
 		}
 
-		// 3. Subscribe to all symbols
 		if err := s.client.Subscribe(); err != nil {
 			log.Printf("[Supervisor] Upstream subscription failed: %v", err)
 			_ = s.client.Close()
@@ -79,14 +86,12 @@ func (s *Supervisor) Run(ctx context.Context, out chan<- []byte) {
 			continue
 		}
 
-		// Connected, authenticated & subscribed successfully!
 		s.mu.Lock()
 		s.reconnects++
 		s.mu.Unlock()
-		currentBackoff = s.config.InitialBackoff // Reset backoff on success
-		log.Println("[Supervisor] Upstream feed fully operational. Ingesting live ticks...")
+		currentBackoff = s.config.InitialBackoff
+		log.Println("[Supervisor] Connected and subscribed. Streaming market data...")
 
-		// 4. Ingest ticks until connection drops or context is cancelled
 		err := s.client.Listen(ctx, out)
 		if err != nil {
 			select {

@@ -30,16 +30,12 @@ func (pe *PricingEngine) ProcessTick(tick *CleanTick) *MarketPrice {
 	}
 	pe.mu.Unlock()
 
-	// 1. Add tick to the rolling window
 	rw.AddTick(tick.MidPrice, tick.Timestamp)
-
-	// 2. Compute our own 24h High, 24h Low, and 24h % Change
 	high24h, low24h, change24h := rw.Get24hStats(tick.MidPrice, tick.Timestamp)
 
-	// 3. Measure end-to-end processing latency from tick timestamp to now
 	latency := float64(time.Since(tick.Timestamp).Microseconds()) / 1000.0
 	if latency < 0 {
-		latency = 0.001 // sub-millisecond
+		latency = 0.001
 	}
 
 	enriched := &MarketPrice{

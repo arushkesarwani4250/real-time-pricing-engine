@@ -11,25 +11,39 @@ import (
 
 // Config holds all environment-based configuration for the application.
 type Config struct {
-	UpstreamWSURL string
-	APIKey        string
-	SecretKey     string
-	Port          string
-	LogLevel      string
-	MockFeed      bool
+	UpstreamWSURL  string
+	APIKey         string
+	SecretKey      string
+	Port           string
+	LogLevel       string
+	MockFeed       bool
+	AllowedOrigins []string
 }
 
 // Load loads the configuration from .env (if present) and system environment variables.
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
+	originsRaw := getEnv("ALLOWED_ORIGINS", "*")
+	var origins []string
+	if originsRaw == "*" || originsRaw == "" {
+		origins = []string{"*"}
+	} else {
+		for _, o := range strings.Split(originsRaw, ",") {
+			if trimmed := strings.TrimSpace(o); trimmed != "" {
+				origins = append(origins, trimmed)
+			}
+		}
+	}
+
 	cfg := &Config{
-		UpstreamWSURL: getEnv("UPSTREAM_WS_URL", "wss://v3-prod.livefxhub.com/ws/algo"),
-		APIKey:        strings.TrimSpace(os.Getenv("API_KEY")),
-		SecretKey:     strings.TrimSpace(os.Getenv("SECRET_KEY")),
-		Port:          getEnv("PORT", "8080"),
-		LogLevel:      getEnv("LOG_LEVEL", "info"),
-		MockFeed:      strings.ToLower(strings.TrimSpace(os.Getenv("MOCK_FEED"))) == "true",
+		UpstreamWSURL:  getEnv("UPSTREAM_WS_URL", "wss://v3-prod.livefxhub.com/ws/algo"),
+		APIKey:         strings.TrimSpace(os.Getenv("API_KEY")),
+		SecretKey:      strings.TrimSpace(os.Getenv("SECRET_KEY")),
+		Port:           getEnv("PORT", "8080"),
+		LogLevel:       getEnv("LOG_LEVEL", "info"),
+		MockFeed:       strings.ToLower(strings.TrimSpace(os.Getenv("MOCK_FEED"))) == "true",
+		AllowedOrigins: origins,
 	}
 
 	// Validation: Fail fast only if not running mock feed

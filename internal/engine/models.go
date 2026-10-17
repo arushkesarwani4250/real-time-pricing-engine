@@ -2,16 +2,17 @@ package engine
 
 import "time"
 
-// RawUpstreamTick matches the exact JSON schema streamed by the upstream feed.
-// Note: low_24h, high_24h, and change_24h are received but MUST BE IGNORED per assignment instructions.
+// RawUpstreamTick matches the wire JSON schema streamed by the upstream feed.
+// Upstream statistics (Low24h, High24h, Change24h) are ignored in favor of
+// internally computed rolling-window metrics.
 type RawUpstreamTick struct {
 	Symbol    string  `json:"symbol"`
 	Buy       float64 `json:"buy"`
 	Sell      float64 `json:"sell"`
-	Low24h    float64 `json:"low_24h"`    // IGNORED: We compute our own rolling 24h low
-	High24h   float64 `json:"high_24h"`   // IGNORED: We compute our own rolling 24h high
-	Change24h float64 `json:"change_24h"` // IGNORED: We compute our own rolling 24h % change
-	Timestamp int64   `json:"timestamp"`  // Unix timestamp (milliseconds or seconds)
+	Low24h    float64 `json:"low_24h"`
+	High24h   float64 `json:"high_24h"`
+	Change24h float64 `json:"change_24h"`
+	Timestamp int64   `json:"timestamp"` // Unix timestamp in seconds or milliseconds
 }
 
 // CleanTick represents a validated, sanitized market price tick ready for engine processing.

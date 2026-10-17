@@ -8,19 +8,18 @@ type ClientRequest struct {
 	Symbols []string `json:"symbols,omitempty"` // Symbol list, or empty for all symbols
 }
 
-// CompactPriceUpdate is the delta-encoded outbound price update.
-// Compact fields minimize payload footprint to stay well under the < 10KB requirement (~120 bytes per tick).
+// CompactPriceUpdate is the delta-encoded outbound price update sent over WebSocket.
 type CompactPriceUpdate struct {
 	Type      string  `json:"type"`       // "price_update"
-	Symbol    string  `json:"symbol"`     // e.g. "BTCUSD"
+	Symbol    string  `json:"symbol"`     // Instrument identifier (e.g. "BTCUSD")
 	Buy       float64 `json:"buy"`        // Bid price
 	Sell      float64 `json:"sell"`       // Ask price
-	Mid       float64 `json:"mid"`        // (Buy + Sell) / 2
-	High24h   float64 `json:"high_24h"`   // Our 24h computed high
-	Low24h    float64 `json:"low_24h"`    // Our 24h computed low
-	Change24h float64 `json:"change_24h"` // Our 24h % change
-	Timestamp int64   `json:"timestamp"`  // Unix millisecond
-	LatencyMs float64 `json:"latency_ms"` // End-to-end processing latency
+	Mid       float64 `json:"mid"`        // Mid price: (Buy + Sell) / 2
+	High24h   float64 `json:"high_24h"`   // Rolling 24-hour high
+	Low24h    float64 `json:"low_24h"`    // Rolling 24-hour low
+	Change24h float64 `json:"change_24h"` // Rolling 24-hour percentage change
+	Timestamp int64   `json:"timestamp"`  // Unix millisecond timestamp
+	LatencyMs float64 `json:"latency_ms"` // Internal pipeline processing latency
 }
 
 // ServerResponse is sent for acknowledgements or errors.

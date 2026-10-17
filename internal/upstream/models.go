@@ -13,7 +13,7 @@ type SubscribeRequest struct {
 	Symbols []string `json:"symbols"`
 }
 
-// AllRequiredSymbols contains all 61 symbols listed in the assignment document.
+// AllRequiredSymbols defines the default list of currency pairs, precious metals, and crypto assets.
 var AllRequiredSymbols = []string{
 	"AUDUSD", "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD",
 	"AUDSGD", "CADCHF", "CADJPY", "CHFJPY", "CHFSGD",

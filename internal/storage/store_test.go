@@ -18,7 +18,6 @@ func TestFileStore_SaveAndRestore(t *testing.T) {
 		t.Fatalf("failed to create FileStore: %v", err)
 	}
 
-	// 1. Setup first engine and process some ticks
 	pe1 := engine.NewPricingEngine()
 	now := time.Now()
 
@@ -37,24 +36,21 @@ func TestFileStore_SaveAndRestore(t *testing.T) {
 		Timestamp: now.Add(1 * time.Minute),
 	})
 
-	// 2. Export state and save to disk
 	stateToSave := pe1.ExportState()
 	if err := store.SaveState(stateToSave); err != nil {
 		t.Fatalf("failed to save state: %v", err)
 	}
 
-	// Verify file was created on disk
 	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
 		t.Fatalf("state file was not created on disk: %s", stateFile)
 	}
 
-	// 3. Simulate process crash / server restart: Create BRAND NEW empty engine
+	// Verify fresh engine instance restores correctly from stored state
 	pe2 := engine.NewPricingEngine()
 	if _, exists := pe2.GetPrice("BTCUSD"); exists {
 		t.Fatal("new engine should have zero state before restore")
 	}
 
-	// 4. Load from disk and restore into pe2
 	loadedState, err := store.LoadState()
 	if err != nil {
 		t.Fatalf("failed to load state from disk: %v", err)
@@ -65,7 +61,6 @@ func TestFileStore_SaveAndRestore(t *testing.T) {
 		t.Fatalf("expected 1 symbol restored, got %d", restored)
 	}
 
-	// 5. Verify restored metrics survive restart!
 	price, exists := pe2.GetPrice("BTCUSD")
 	if !exists {
 		t.Fatal("BTCUSD should exist in restored engine")
@@ -94,5 +89,73 @@ func TestFileStore_ColdStart(t *testing.T) {
 	}
 	if state != nil {
 		t.Fatalf("expected nil state on cold start, got: %+v", state)
+	}
+}
+
+func TestFileStore_CorruptedFileRecovery(t *testing.T) {
+	tempDir := t.TempDir()
+	stateFile := filepath.Join(tempDir, "corrupted_state.json")
+
+	corruptedData := []byte(`{"saved_at":"2026-01-01T00:00:00Z", "symbols": { "BTCUSD": {"incomplete json...`)
+	if err := os.WriteFile(stateFile, corruptedData, 0644); err != nil {
+		t.Fatalf("failed to write corrupted file: %v", err)
+	}
+
+	store, err := NewFileStore(stateFile)
+	if err != nil {
+		t.Fatalf("NewFileStore failed: %v", err)
+	}
+
+	state, err := store.LoadState()
+	if err == nil {
+		t.Fatal("expected error when loading corrupted state file, got nil")
+	}
+	if state != nil {
+		t.Fatalf("expected nil state on corrupted file, got: %+v", state)
+	}
+
+	// Verify that saving valid state overwrites corrupted file cleanly
+	pe := engine.NewPricingEngine()
+	pe.ProcessTick(&engine.CleanTick{
+		Symbol:    "ETHUSD",
+		Buy:       3500.0,
+		Sell:      3505.0,
+		MidPrice:  3502.5,
+		Timestamp: time.Now(),
+	})
+
+	cleanState := pe.ExportState()
+	if err := store.SaveState(cleanState); err != nil {
+		t.Fatalf("failed to overwrite corrupted file with clean state: %v", err)
+	}
+
+	recoveredState, err := store.LoadState()
+	if err != nil {
+		t.Fatalf("expected clean state after overwrite, got error: %v", err)
+	}
+	if recoveredState == nil || len(recoveredState.Symbols) != 1 {
+		t.Fatalf("expected 1 recovered symbol, got: %+v", recoveredState)
+	}
+}
+
+func TestFileStore_EmptyFile(t *testing.T) {
+	tempDir := t.TempDir()
+	emptyFile := filepath.Join(tempDir, "empty_state.json")
+
+	if err := os.WriteFile(emptyFile, []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create empty file: %v", err)
+	}
+
+	store, err := NewFileStore(emptyFile)
+	if err != nil {
+		t.Fatalf("NewFileStore failed: %v", err)
+	}
+
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatalf("expected nil error on empty state file, got: %v", err)
+	}
+	if state != nil {
+		t.Fatalf("expected nil state on empty state file, got: %+v", state)
 	}
 }
